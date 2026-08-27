@@ -99,7 +99,7 @@ async function writeFailingTest(root: string, marker: string): Promise<void> {
 }
 
 async function snapshot(root: string, name: string): Promise<WatchSnapshot> {
-  const result = await command(root, "snapshot", name, "--json");
+  const result = await command(root, "snapshot", name);
   return JSON.parse(result.stdout) as WatchSnapshot;
 }
 
@@ -132,7 +132,7 @@ async function waitForNoDaemons(root: string): Promise<void> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const statuses = JSON.parse(
-      (await command(root, "status", "--json")).stdout,
+      (await command(root, "status")).stdout,
     ) as unknown[];
     if (statuses.length === 0) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -169,7 +169,7 @@ describe.sequential("vitest-daemon CLI", () => {
     );
 
     const daemonStatus = JSON.parse(
-      (await command(root, "status", "unit", "--json")).stdout,
+      (await command(root, "status", "unit")).stdout,
     ) as Record<string, unknown>;
     expect(Object.keys(daemonStatus)).toEqual(["status"]);
     expect(["starting", "running"]).toContain(daemonStatus.status);
@@ -240,30 +240,28 @@ describe.sequential("vitest-daemon CLI", () => {
     );
 
     const firstStatuses = JSON.parse(
-      (await command(firstRoot, "status", "--json")).stdout,
+      (await command(firstRoot, "status")).stdout,
     ) as Array<{ name: string; status: string }>;
     const secondStatuses = JSON.parse(
-      (await command(secondRoot, "status", "--json")).stdout,
+      (await command(secondRoot, "status")).stdout,
     ) as Array<{ name: string; status: string }>;
     expect(firstStatuses.map(({ name }) => name)).toEqual(["other", "shared"]);
     expect(secondStatuses.map(({ name }) => name)).toEqual(["shared"]);
 
     await command(firstRoot, "stop", "shared");
-    expect((await command(firstRoot, "status", "other")).stdout).toMatch(
-      /starting|running/,
-    );
-    expect((await command(secondRoot, "status", "shared")).stdout).toMatch(
-      /starting|running/,
-    );
+    expect(
+      JSON.parse((await command(firstRoot, "status", "other")).stdout),
+    ).toMatchObject({ status: expect.stringMatching(/starting|running/) });
+    expect(
+      JSON.parse((await command(secondRoot, "status", "shared")).stdout),
+    ).toMatchObject({ status: expect.stringMatching(/starting|running/) });
 
     await command(firstRoot, "stop", "--all");
     await waitForNoDaemons(firstRoot);
-    expect((await command(firstRoot, "status")).stdout).toBe(
-      "No active daemons.\n",
-    );
-    expect((await command(secondRoot, "status", "shared")).stdout).toMatch(
-      /starting|running/,
-    );
+    expect(JSON.parse((await command(firstRoot, "status")).stdout)).toEqual([]);
+    expect(
+      JSON.parse((await command(secondRoot, "status", "shared")).stdout),
+    ).toMatchObject({ status: expect.stringMatching(/starting|running/) });
   });
 
   it("recovers a stale discovery entry when starting the same watcher name", async () => {
@@ -286,6 +284,8 @@ describe.sequential("vitest-daemon CLI", () => {
       "unit",
     );
     await waitForSnapshot(root, "unit", "passed");
-    expect((await command(root, "status", "unit")).stdout).toBe("running\n");
+    expect(JSON.parse((await command(root, "status", "unit")).stdout)).toEqual({
+      status: "running",
+    });
   });
 });

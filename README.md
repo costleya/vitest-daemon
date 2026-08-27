@@ -29,15 +29,15 @@ vitest-daemon stop --all
 
 # Any agent: inspect the watcher
 vitest-daemon status unit
-vitest-daemon status --json
+vitest-daemon status
 vitest-daemon snapshot unit
-vitest-daemon snapshot unit --json
 vitest-daemon output unit
 ```
 
 `status` reports only whether the daemon is starting, running, or stopping.
 `snapshot` reports Vitest's current structured checking, passed, or failed
-state. `output` writes the bounded stdout/stderr captured from Vitest without a
+state. Both commands always write one JSON value followed by a newline.
+`output` writes the bounded stdout/stderr captured from Vitest without a
 heading, JSON wrapper, ANSI stripping, or an added newline.
 
 Each watcher name has fixed Vitest arguments. Stop it and start it again to use

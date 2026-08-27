@@ -16,12 +16,7 @@ import {
   watcherKey,
 } from "./discovery.js";
 import { runDaemon } from "./daemon.js";
-import type {
-  DiscoveryRecord,
-  JsonResponse,
-  SettledSnapshot,
-  WatchSnapshot,
-} from "./types.js";
+import type { DiscoveryRecord, JsonResponse } from "./types.js";
 
 const VERSION = "0.1.0";
 
@@ -29,15 +24,14 @@ type ParsedCommand = {
   command: string;
   positionals: string[];
   root: string;
-  json: boolean;
   vitestArguments: string[];
 };
 
 function usage(): string {
   return `Usage:
   vitest-daemon start <name> [--root <path>] -- <vitest arguments>
-  vitest-daemon status [name] [--root <path>] [--json]
-  vitest-daemon snapshot <name> [--root <path>] [--json]
+  vitest-daemon status [name] [--root <path>]
+  vitest-daemon snapshot <name> [--root <path>]
   vitest-daemon output <name> [--root <path>]
   vitest-daemon stop <name|--all> [--root <path>]
 `;
@@ -51,7 +45,6 @@ function parseCommand(arguments_: string[]): ParsedCommand {
     separator === -1 ? [] : arguments_.slice(separator + 1);
   const command = cliArguments.shift() ?? "";
   let root = process.cwd();
-  let json = false;
   const positionals: string[] = [];
 
   for (let index = 0; index < cliArguments.length; index += 1) {
@@ -61,13 +54,11 @@ function parseCommand(arguments_: string[]): ParsedCommand {
       if (!value) throw new Error("--root requires a path.");
       root = value;
       index += 1;
-    } else if (argument === "--json") {
-      json = true;
     } else if (argument) {
       positionals.push(argument);
     }
   }
-  return { command, positionals, root, json, vitestArguments };
+  return { command, positionals, root, vitestArguments };
 }
 
 function encodeDaemonOptions(value: unknown): string {
@@ -193,11 +184,7 @@ async function status(command: ParsedCommand, root: string): Promise<void> {
     const response = await requestJson(record.socket, { command: "status" });
     if (isOperationalError(response)) throw new Error(response.error);
     if (!("status" in response)) throw new Error("Unexpected daemon response.");
-    process.stdout.write(
-      command.json
-        ? `${JSON.stringify({ status: response.status })}\n`
-        : `${response.status}\n`,
-    );
+    process.stdout.write(`${JSON.stringify({ status: response.status })}\n`);
     return;
   }
 
@@ -217,37 +204,7 @@ async function status(command: ParsedCommand, root: string): Promise<void> {
     }),
   );
   const statuses = active.filter((value) => value !== undefined);
-  if (command.json) {
-    process.stdout.write(`${JSON.stringify(statuses)}\n`);
-  } else if (statuses.length === 0) {
-    process.stdout.write("No active daemons.\n");
-  } else {
-    process.stdout.write(
-      statuses.map((value) => `${value.name}\t${value.status}`).join("\n") +
-        "\n",
-    );
-  }
-}
-
-function printSnapshot(snapshot: WatchSnapshot): string {
-  if (snapshot.state === "checking") return "checking\n";
-  const settled: SettledSnapshot = snapshot;
-  const lines = [
-    settled.state,
-    `Tests: ${settled.counts.passed} passed, ${settled.counts.failed} failed, ${settled.counts.skipped} skipped`,
-  ];
-  for (const failure of settled.failures) {
-    const location = [failure.project, failure.file, failure.test]
-      .filter(Boolean)
-      .join(" > ");
-    if (location) lines.push(`FAIL ${location}`);
-    for (const error of failure.errors)
-      lines.push(error.stack ?? error.message);
-  }
-  for (const error of settled.unhandledErrors) {
-    lines.push("UNHANDLED", error.stack ?? error.message);
-  }
-  return `${lines.join("\n")}\n`;
+  process.stdout.write(`${JSON.stringify(statuses)}\n`);
 }
 
 async function snapshot(command: ParsedCommand, root: string): Promise<void> {
@@ -257,16 +214,11 @@ async function snapshot(command: ParsedCommand, root: string): Promise<void> {
   const response = await requestJson(record.socket, { command: "snapshot" });
   if (isOperationalError(response)) throw new Error(response.error);
   if (!("snapshot" in response)) throw new Error("Unexpected daemon response.");
-  process.stdout.write(
-    command.json
-      ? `${JSON.stringify(response.snapshot)}\n`
-      : printSnapshot(response.snapshot),
-  );
+  process.stdout.write(`${JSON.stringify(response.snapshot)}\n`);
 }
 
 async function output(command: ParsedCommand, root: string): Promise<void> {
-  if (command.json || command.positionals.length !== 1)
-    throw new Error(usage());
+  if (command.positionals.length !== 1) throw new Error(usage());
   const name = validateName(command.positionals[0] ?? "");
   const record = await requireRecord(root, name);
   process.stdout.write(
