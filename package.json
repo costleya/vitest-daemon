@@ -1,0 +1,45 @@
+{
+  "name": "vitest-daemon",
+  "version": "0.1.0",
+  "description": "Detached, worktree-scoped Vitest watch processes for coding agents",
+  "type": "module",
+  "bin": {
+    "vitest-daemon": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "pnpm build && vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier . --check",
+    "format:fix": "prettier . --write"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "peerDependencies": {
+    "vitest": "^4.1.10"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "prettier": "^3.6.2",
+    "typescript": "^6.0.0",
+    "vitest": "^4.1.10"
+  },
+  "keywords": [
+    "vitest",
+    "watch",
+    "daemon",
+    "agents"
+  ],
+  "license": "MIT"
+}
