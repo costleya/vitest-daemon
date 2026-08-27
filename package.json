@@ -7,6 +7,7 @@
     "vitest-daemon": "./dist/cli.js"
   },
   "files": [
+    ".agents/skills/vitest-daemon",
     "dist",
     "README.md",
     "LICENSE"

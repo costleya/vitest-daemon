@@ -156,6 +156,42 @@ afterEach(async () => {
 });
 
 describe.sequential("vitest-daemon CLI", () => {
+  it("installs the bundled agent skill without overwriting by default", async () => {
+    const root = await createFixture("install");
+    const destination = path.join(
+      root,
+      ".agents",
+      "skills",
+      "vitest-daemon",
+      "SKILL.md",
+    );
+    const source = path.join(
+      repositoryRoot,
+      ".agents",
+      "skills",
+      "vitest-daemon",
+      "SKILL.md",
+    );
+
+    expect((await command(root, "install")).stdout).toContain(
+      "Installed vitest-daemon skill",
+    );
+    expect(await readFile(destination, "utf8")).toBe(
+      await readFile(source, "utf8"),
+    );
+
+    await writeFile(destination, "customized\n");
+    await expect(command(root, "install")).rejects.toThrow(
+      "Skill already exists",
+    );
+    expect(await readFile(destination, "utf8")).toBe("customized\n");
+
+    await command(root, "install", "--force");
+    expect(await readFile(destination, "utf8")).toBe(
+      await readFile(source, "utf8"),
+    );
+  });
+
   it("survives the launcher, separates status/snapshot/output, and follows edits", async () => {
     const root = await createFixture("lifecycle");
     await command(

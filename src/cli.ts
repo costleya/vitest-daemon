@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { rm } from "node:fs/promises";
+import { cp, lstat, rm } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { requestBuffer, requestJson } from "./client.js";
@@ -19,6 +20,9 @@ import { runDaemon } from "./daemon.js";
 import type { DiscoveryRecord, JsonResponse } from "./types.js";
 
 const VERSION = "0.1.0";
+const SKILL_SOURCE = fileURLToPath(
+  new URL("../.agents/skills/vitest-daemon", import.meta.url),
+);
 
 type ParsedCommand = {
   command: string;
@@ -29,12 +33,43 @@ type ParsedCommand = {
 
 function usage(): string {
   return `Usage:
+  vitest-daemon install [--force] [--root <path>]
   vitest-daemon start <name> [--root <path>] -- <vitest arguments>
   vitest-daemon status [name] [--root <path>]
   vitest-daemon snapshot <name> [--root <path>]
   vitest-daemon output <name> [--root <path>]
   vitest-daemon stop <name|--all> [--root <path>]
 `;
+}
+
+async function pathExists(value: string): Promise<boolean> {
+  try {
+    await lstat(value);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function install(command: ParsedCommand, root: string): Promise<void> {
+  const force = command.positionals[0] === "--force";
+  if (
+    command.positionals.length > (force ? 1 : 0) ||
+    command.vitestArguments.length > 0
+  ) {
+    throw new Error(usage());
+  }
+
+  const destination = path.join(root, ".agents", "skills", "vitest-daemon");
+  if ((await pathExists(destination)) && !force) {
+    throw new Error(
+      `Skill already exists at ${destination}. Use --force to overwrite it.`,
+    );
+  }
+
+  await cp(SKILL_SOURCE, destination, { recursive: true, force: true });
+  process.stdout.write(`Installed vitest-daemon skill at ${destination}.\n`);
 }
 
 function parseCommand(arguments_: string[]): ParsedCommand {
@@ -277,7 +312,8 @@ async function main(): Promise<void> {
 
   const command = parseCommand(rawArguments);
   const root = await canonicalRoot(command.root);
-  if (command.command === "start") await start(command, root);
+  if (command.command === "install") await install(command, root);
+  else if (command.command === "start") await start(command, root);
   else if (command.command === "status") await status(command, root);
   else if (command.command === "snapshot") await snapshot(command, root);
   else if (command.command === "output") await output(command, root);

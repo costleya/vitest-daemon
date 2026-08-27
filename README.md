@@ -22,6 +22,9 @@ dependency of the project being watched, not of the global installation.
 Run commands from the worktree they belong to, or pass `--root <path>`.
 
 ```sh
+# Copy the bundled agent skill into the current worktree
+vitest-daemon install
+
 # Parent agent: start and stop lifecycle
 vitest-daemon start unit -- --project unit
 vitest-daemon stop unit
