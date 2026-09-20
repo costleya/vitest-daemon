@@ -3,12 +3,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import {
-  removeDiscovery,
-  socketAddress,
-  watcherKey,
-  writeDiscovery,
-} from "./discovery.js";
+import { socketAddress, watcherKey, writeDiscovery } from "./discovery.js";
 import { ByteRingBuffer } from "./ring-buffer.js";
 import { SnapshotReporter } from "./snapshot-reporter.js";
 import type {
@@ -91,7 +86,8 @@ export async function runDaemon(options: DaemonOptions): Promise<void> {
   let lifecycle: DaemonLifecycle = "starting";
   let snapshot: WatchSnapshot = { state: "checking" };
   let vitest: VitestContext | undefined;
-  let shuttingDown = false;
+  let shutdownPromise: Promise<void> | undefined;
+  let initialization: Promise<void> | undefined;
 
   const reporter = new SnapshotReporter((value) => {
     snapshot = value;
@@ -113,8 +109,8 @@ export async function runDaemon(options: DaemonOptions): Promise<void> {
           return;
         }
         if (request.command === "stop") {
+          await shutdown();
           connection.end(json({ ok: true }));
-          void shutdown();
           return;
         }
         connection.end(json({ ok: false, error: "Unknown daemon command." }));
@@ -129,21 +125,36 @@ export async function runDaemon(options: DaemonOptions): Promise<void> {
       });
   });
 
-  async function shutdown(): Promise<void> {
-    if (shuttingDown) return;
-    shuttingDown = true;
+  function shutdown(): Promise<void> {
+    if (shutdownPromise) return shutdownPromise;
     lifecycle = "stopping";
-    server.close();
-    try {
-      await vitest?.close();
-    } finally {
-      await removeDiscovery(key);
-      process.exitCode = 0;
-    }
+    // Keep discovery and the control socket available until the process exits.
+    // This timer also covers startup and a rejected or hung close operation.
+    const deadline = setTimeout(() => process.exit(1), 5000);
+    shutdownPromise = (async () => {
+      let exitCode = 0;
+      try {
+        await initialization;
+        await vitest?.close();
+      } catch (error) {
+        exitCode = 1;
+        throw error;
+      } finally {
+        clearTimeout(deadline);
+        // Give stop responses a chance to flush, then release every in-process
+        // handle even if Vitest left a server or worker behind.
+        setTimeout(() => process.exit(exitCode), 50);
+      }
+    })();
+    return shutdownPromise;
   }
 
-  process.once("SIGINT", () => void shutdown());
-  process.once("SIGTERM", () => void shutdown());
+  process.once("SIGINT", () => {
+    void shutdown().catch(() => {});
+  });
+  process.once("SIGTERM", () => {
+    void shutdown().catch(() => {});
+  });
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -153,6 +164,8 @@ export async function runDaemon(options: DaemonOptions): Promise<void> {
     root: options.root,
     name: options.name,
     socket,
+    pid: process.pid,
+    identity: process.argv[3]!,
   });
 
   if (process.send) {
@@ -160,47 +173,49 @@ export async function runDaemon(options: DaemonOptions): Promise<void> {
     process.disconnect();
   }
 
-  try {
-    const vitestNode = await loadVitest(options.root);
-    const parsed = vitestNode.parseCLI(["vitest", ...options.vitestArguments]);
-    parsed.options.root = options.root;
-    parsed.options.watch = true;
-    parsed.options.run = false;
+  initialization = (async () => {
+    try {
+      const vitestNode = await loadVitest(options.root);
+      const parsed = vitestNode.parseCLI([
+        "vitest",
+        ...options.vitestArguments,
+      ]);
+      parsed.options.root = options.root;
+      parsed.options.watch = true;
+      parsed.options.run = false;
 
-    vitest = await vitestNode.createVitest(
-      "test",
-      parsed.options,
-      {},
-      { stdout: outputStream, stderr: outputStream },
-    );
-    vitest.reporters.push(reporter);
-    await vitest.start(parsed.filter);
-    if (!vitest.shouldKeepServer()) {
-      throw new Error("Vitest did not remain in watch mode.");
+      vitest = await vitestNode.createVitest(
+        "test",
+        parsed.options,
+        {},
+        { stdout: outputStream, stderr: outputStream },
+      );
+      vitest.reporters.push(reporter);
+      await vitest.start(parsed.filter);
+      if (!vitest.shouldKeepServer()) {
+        throw new Error("Vitest did not remain in watch mode.");
+      }
+      if (!shutdownPromise) lifecycle = "running";
+    } catch (error) {
+      snapshot = {
+        state: "failed",
+        counts: { passed: 0, failed: 0, skipped: 0 },
+        failures: [
+          {
+            errors: [
+              {
+                message: error instanceof Error ? error.message : String(error),
+                ...(error instanceof Error && error.stack
+                  ? { stack: error.stack }
+                  : {}),
+              },
+            ],
+          },
+        ],
+        unhandledErrors: [],
+      };
+      if (!shutdownPromise) lifecycle = "running";
     }
-    if (shuttingDown) {
-      await vitest.close();
-      return;
-    }
-    lifecycle = "running";
-  } catch (error) {
-    snapshot = {
-      state: "failed",
-      counts: { passed: 0, failed: 0, skipped: 0 },
-      failures: [
-        {
-          errors: [
-            {
-              message: error instanceof Error ? error.message : String(error),
-              ...(error instanceof Error && error.stack
-                ? { stack: error.stack }
-                : {}),
-            },
-          ],
-        },
-      ],
-      unhandledErrors: [],
-    };
-    lifecycle = "running";
-  }
+  })();
+  await initialization;
 }

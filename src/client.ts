@@ -21,6 +21,9 @@ export function requestBuffer(
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     const connection = createConnection(socket);
+    connection.setTimeout(7000, () =>
+      connection.destroy(new Error("Daemon request timed out.")),
+    );
     connection.once("connect", () => {
       connection.write(`${JSON.stringify(request)}\n`);
     });

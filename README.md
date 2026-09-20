@@ -38,6 +38,16 @@ vitest-daemon output unit
 ```
 
 `status` reports only whether the daemon is starting, running, or stopping.
+
+`stop` waits for the daemon process to exit before reporting success. Shutdown
+has a five-second deadline, including Vitest startup and `close()`. While it
+closes, the daemon remains discoverable as `stopping`. If shutdown hangs, the
+daemon exits to release its in-process servers. Discovery retains the PID and
+a unique launch identity until the CLI confirms exit, allowing a later `stop`
+to recover an unreachable daemon. On macOS and Linux, this fallback verifies
+the process command before forcefully terminating the PID. If identity cannot
+be verified (including legacy records without a PID), the CLI reports an error
+instead of claiming a successful stop.
 `snapshot` reports Vitest's current structured checking, passed, or failed
 state. Both commands always write one JSON value followed by a newline.
 `output` writes the bounded stdout/stderr captured from Vitest without a

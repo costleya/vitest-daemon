@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createConnection } from "node:net";
 import { promisify } from "node:util";
 
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -156,6 +157,106 @@ afterEach(async () => {
 });
 
 describe.sequential("vitest-daemon CLI", () => {
+  it.each(["hang", "reject", "socket-lost", "startup-hang"])(
+    "verifies process and listener exit when shutdown encounters %s",
+    async (mode) => {
+      const root = await createFixture("hanging-close");
+      await rm(path.join(root, "node_modules"));
+      const fake = path.join(root, "node_modules", "vitest");
+      await mkdir(fake, { recursive: true });
+      await writeFile(
+        path.join(fake, "package.json"),
+        JSON.stringify({ type: "module", exports: { "./node": "./node.mjs" } }),
+      );
+      await writeFile(
+        path.join(fake, "node.mjs"),
+        `
+      import { createServer } from 'node:net';
+      import { writeFile } from 'node:fs/promises';
+      export const parseCLI = () => ({ filter: [], options: {} });
+      export async function createVitest() {
+        const server = createServer();
+        await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+        await writeFile('listener.json', JSON.stringify({ pid: process.pid, port: server.address().port }));
+        ${mode === "startup-hang" ? "await new Promise(() => {});" : ""}
+        return { reporters: [], start: async () => {}, shouldKeepServer: () => true,
+          close: async () => { await writeFile('closing', 'yes'); ${mode === "reject" ? "throw new Error('close failed');" : "await new Promise(() => {});"} } };
+      }
+    `,
+      );
+      await command(root, "start", "hang");
+      let listener: { pid: number; port: number } | undefined;
+      try {
+        const deadline = Date.now() + 5000;
+        while (!listener && Date.now() < deadline) {
+          try {
+            listener = JSON.parse(
+              await readFile(path.join(root, "listener.json"), "utf8"),
+            );
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+        }
+        expect(listener).toBeDefined();
+        const key = watcherKey(await canonicalRoot(root), "hang");
+        const record = await readDiscovery(key);
+        expect(record?.pid).toBe(listener!.pid);
+        if (mode === "socket-lost") {
+          await rm(record!.socket);
+          await expect(command(root, "status", "hang")).rejects.toThrow(
+            "live process",
+          );
+          await expect(command(root, "start", "hang")).rejects.toThrow(
+            "live process",
+          );
+        }
+        const stopping = command(root, "stop", "hang");
+        if (mode === "hang") {
+          const deadline = Date.now() + 2000;
+          while (Date.now() < deadline) {
+            try {
+              await readFile(path.join(root, "closing"));
+              break;
+            } catch {
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+          }
+          expect(
+            JSON.parse((await command(root, "status", "hang")).stdout),
+          ).toEqual({ status: "stopping" });
+          expect(await readDiscovery(key)).toBeDefined();
+        }
+        const retry =
+          mode === "hang" ? command(root, "stop", "hang") : undefined;
+        const result = await stopping;
+        if (retry) expect((await retry).stdout).toContain("Stopped hang.");
+        expect(result.stdout).toContain("Stopped hang.");
+        expect(await readDiscovery(key)).toBeUndefined();
+        expect(() => process.kill(listener!.pid, 0)).toThrow();
+        await expect(
+          new Promise<void>((resolve, reject) => {
+            const socket = createConnection({
+              host: "127.0.0.1",
+              port: listener!.port,
+            });
+            socket.once("connect", () => {
+              socket.destroy();
+              resolve();
+            });
+            socket.once("error", reject);
+          }),
+        ).rejects.toThrow();
+      } finally {
+        if (listener) {
+          try {
+            process.kill(listener.pid, "SIGKILL");
+          } catch {}
+        }
+      }
+    },
+    20000,
+  );
+
   it("installs the bundled agent skill without overwriting by default", async () => {
     const root = await createFixture("install");
     const destination = path.join(
@@ -284,7 +385,11 @@ describe.sequential("vitest-daemon CLI", () => {
     expect(firstStatuses.map(({ name }) => name)).toEqual(["other", "shared"]);
     expect(secondStatuses.map(({ name }) => name)).toEqual(["shared"]);
 
+    const stoppedRecord = await readDiscovery(
+      watcherKey(await canonicalRoot(firstRoot), "shared"),
+    );
     await command(firstRoot, "stop", "shared");
+    expect(() => process.kill(stoppedRecord!.pid!, 0)).toThrow();
     expect(
       JSON.parse((await command(firstRoot, "status", "other")).stdout),
     ).toMatchObject({ status: expect.stringMatching(/starting|running/) });

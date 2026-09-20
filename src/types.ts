@@ -36,6 +36,8 @@ export type DiscoveryRecord = {
   root: string;
   name: string;
   socket: string;
+  pid?: number;
+  identity?: string;
 };
 
 export type JsonRequest =

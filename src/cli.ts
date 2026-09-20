@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
+import { isAlive, waitForExit, forceStop } from "./process.js";
 import { spawn } from "node:child_process";
 import { cp, lstat, rm } from "node:fs/promises";
 import path from "node:path";
@@ -129,6 +131,10 @@ async function liveRecord(
     const response = await requestJson(record.socket, { command: "status" });
     return response.ok ? record : undefined;
   } catch {
+    if (isAlive(record))
+      throw new Error(
+        `Watcher ${JSON.stringify(name)} has a live process but its control socket is unavailable; use stop to clean it up.`,
+      );
     return undefined;
   }
 }
@@ -152,6 +158,11 @@ async function start(command: ParsedCommand, root: string): Promise<void> {
     if (await liveRecord(root, name)) {
       throw new Error(`Watcher ${JSON.stringify(name)} is already running.`);
     }
+    const previous = await readDiscovery(key);
+    if (previous && isAlive(previous))
+      throw new Error(
+        `Watcher ${JSON.stringify(name)} still has a live process; stop it before restarting.`,
+      );
     await removeDiscovery(key);
     if (process.platform !== "win32") {
       await rm(socketAddress(key), { force: true });
@@ -165,6 +176,7 @@ async function start(command: ParsedCommand, root: string): Promise<void> {
         encodeDaemonOptions({
           root,
           name,
+          token: randomUUID(),
           vitestArguments: command.vitestArguments,
         }),
       ],
@@ -234,6 +246,10 @@ async function status(command: ParsedCommand, root: string): Promise<void> {
           ? { name: record.name, status: response.status }
           : undefined;
       } catch {
+        if (isAlive(record))
+          throw new Error(
+            `Watcher ${JSON.stringify(record.name)} has a live process but its control socket is unavailable; use stop to clean it up.`,
+          );
         return undefined;
       }
     }),
@@ -262,9 +278,24 @@ async function output(command: ParsedCommand, root: string): Promise<void> {
 }
 
 async function stopOne(root: string, name: string): Promise<void> {
-  const record = await requireRecord(root, validateName(name));
-  const response = await requestJson(record.socket, { command: "stop" });
-  if (isOperationalError(response)) throw new Error(response.error);
+  const key = watcherKey(root, validateName(name));
+  const record = await readDiscovery(key);
+  if (!record || record.root !== root || record.name !== name) {
+    throw new Error(`Watcher ${JSON.stringify(name)} is not running.`);
+  }
+  try {
+    const response = await requestJson(record.socket, { command: "stop" });
+    if (isOperationalError(response)) throw new Error(response.error);
+  } catch (error) {
+    if (!record.pid) throw error;
+    // Timeout shutdown may exit before a response can be sent.
+  }
+  if (!record.pid)
+    throw new Error(
+      "Legacy daemon has no PID; cannot verify shutdown. Retry status before restarting.",
+    );
+  if (!(await waitForExit(record, 1000))) await forceStop(record);
+  await removeDiscovery(key);
 }
 
 async function stop(command: ParsedCommand, root: string): Promise<void> {
@@ -277,8 +308,9 @@ async function stop(command: ParsedCommand, root: string): Promise<void> {
       try {
         await stopOne(root, record.name);
         stopped.push(record.name);
-      } catch {
-        // Stale records are ignored; start recovers them by key.
+      } catch (error) {
+        if (isAlive(record)) throw error;
+        // Stale records are ignored.
       }
     }
     process.stdout.write(
