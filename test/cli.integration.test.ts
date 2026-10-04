@@ -4,6 +4,7 @@ import {
   mkdir,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -26,6 +27,10 @@ import type { WatchSnapshot } from "../src/types.js";
 const execFileAsync = promisify(execFile);
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const cliPath = path.join(repositoryRoot, "dist", "cli.js");
+const fixtureNodeModules = path.resolve(
+  process.env.VITEST_DAEMON_FIXTURE_NODE_MODULES ??
+    path.join(repositoryRoot, "node_modules"),
+);
 const fixtures: string[] = [];
 
 type CommandResult = { stdout: string; stderr: string };
@@ -54,6 +59,23 @@ async function output(root: string, name: string): Promise<Buffer> {
   return result.stdout;
 }
 
+async function waitForOutputMarker(
+  root: string,
+  name: string,
+  marker: string,
+): Promise<string> {
+  const deadline = Date.now() + 15_000;
+  let current = "";
+  while (Date.now() < deadline) {
+    current = (await output(root, name)).toString();
+    if (current.includes(marker)) return current;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Timed out waiting for output marker ${JSON.stringify(marker)}; current snapshot: ${JSON.stringify(await snapshot(root, name))}; current output: ${current}`,
+  );
+}
+
 async function createFixture(label: string): Promise<string> {
   const directory = await mkdtemp(
     path.join(tmpdir(), `vitest-daemon-${label}-`),
@@ -63,10 +85,7 @@ async function createFixture(label: string): Promise<string> {
     path.join(directory, "package.json"),
     JSON.stringify({ name: `fixture-${label}`, type: "module", private: true }),
   );
-  await symlink(
-    path.join(repositoryRoot, "node_modules"),
-    path.join(directory, "node_modules"),
-  );
+  await symlink(fixtureNodeModules, path.join(directory, "node_modules"));
   await writeFile(
     path.join(directory, "vitest.config.mjs"),
     `export default { test: { reporters: ['verbose'], projects: [{ test: { name: 'unit', include: ['sample.test.mjs'] } }] } }\n`,
@@ -82,6 +101,7 @@ async function writePassingTest(root: string, marker: string): Promise<void> {
       `test('sample', async () => {\n` +
       `  await new Promise(resolve => setTimeout(resolve, 250))\n` +
       `  console.log(${JSON.stringify(marker)})\n` +
+      `  console.error(${JSON.stringify(`${marker.toUpperCase()}-STDERR`)})\n` +
       `  expect(true).toBe(true)\n` +
       `})\n`,
   );
@@ -94,6 +114,7 @@ async function writeFailingTest(root: string, marker: string): Promise<void> {
       `test('sample', async () => {\n` +
       `  await new Promise(resolve => setTimeout(resolve, 250))\n` +
       `  console.log(${JSON.stringify(marker)})\n` +
+      `  console.error(${JSON.stringify(`${marker.toUpperCase()}-STDERR`)})\n` +
       `  expect(true).toBe(false)\n` +
       `})\n`,
   );
@@ -156,7 +177,7 @@ afterEach(async () => {
   );
 });
 
-describe.sequential("vitest-daemon CLI", () => {
+describe("vitest-daemon CLI", { concurrent: false }, () => {
   it.each(["hang", "reject", "socket-lost", "startup-hang"])(
     "verifies process and listener exit when shutdown encounters %s",
     async (mode) => {
@@ -334,6 +355,12 @@ describe.sequential("vitest-daemon CLI", () => {
       state: "failed",
       counts: { passed: 0, failed: 1, skipped: 0 },
     });
+    expect(await waitForOutputMarker(root, "unit", "lifecycle-fail")).toContain(
+      "lifecycle-fail",
+    );
+    expect(
+      await waitForOutputMarker(root, "unit", "LIFECYCLE-FAIL-STDERR"),
+    ).toContain("LIFECYCLE-FAIL-STDERR");
 
     await writePassingTest(root, "lifecycle-recovered");
     const recovered = await waitForSnapshot(root, "unit", "passed");
@@ -342,6 +369,12 @@ describe.sequential("vitest-daemon CLI", () => {
       counts: { passed: 1, failed: 0, skipped: 0 },
       failures: [],
     });
+    expect(
+      await waitForOutputMarker(root, "unit", "lifecycle-recovered"),
+    ).toContain("lifecycle-recovered");
+    expect(
+      await waitForOutputMarker(root, "unit", "LIFECYCLE-RECOVERED-STDERR"),
+    ).toContain("LIFECYCLE-RECOVERED-STDERR");
   });
 
   it("supports multiple names and isolates identical names across roots", async () => {
@@ -429,4 +462,119 @@ describe.sequential("vitest-daemon CLI", () => {
       status: "running",
     });
   });
+
+  it("isolates linked git worktrees through watch failure, recovery, and exact-name shutdown", async () => {
+    const firstRoot = await createFixture("worktree");
+    const secondRoot = `${firstRoot}-linked`;
+    fixtures.push(secondRoot);
+    const git = (...arguments_: string[]) =>
+      execFileAsync("git", ["-C", firstRoot, ...arguments_], {
+        encoding: "utf8",
+        timeout: 15_000,
+      });
+    await git("init", "--quiet");
+    await git("add", "package.json", "vitest.config.mjs", "sample.test.mjs");
+    await git(
+      "-c",
+      "user.name=Vitest daemon fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "commit",
+      "--quiet",
+      "-m",
+      "Create disposable test fixture",
+    );
+    await git("worktree", "add", "--quiet", "--detach", secondRoot);
+    await symlink(fixtureNodeModules, path.join(secondRoot, "node_modules"));
+    const commonDirectory = async (root: string) => {
+      const result = await execFileAsync(
+        "git",
+        ["-C", root, "rev-parse", "--git-common-dir"],
+        { encoding: "utf8" },
+      );
+      return canonicalRoot(path.resolve(root, result.stdout.trim()));
+    };
+    expect(await commonDirectory(secondRoot)).toBe(
+      await commonDirectory(firstRoot),
+    );
+
+    for (const root of [firstRoot, secondRoot]) {
+      await command(root, "start", "shared", "--", "--project", "unit");
+      expect(await waitForSnapshot(root, "shared", "passed")).toMatchObject({
+        counts: { passed: 1, failed: 0, skipped: 0 },
+        failures: [],
+        unhandledErrors: [],
+      });
+    }
+    const firstKey = watcherKey(await canonicalRoot(firstRoot), "shared");
+    const secondKey = watcherKey(await canonicalRoot(secondRoot), "shared");
+    expect(firstKey).not.toBe(secondKey);
+    const firstRecord = await readDiscovery(firstKey);
+    const secondRecord = await readDiscovery(secondKey);
+    expect(firstRecord?.pid).toEqual(expect.any(Number));
+    expect(secondRecord?.pid).toEqual(expect.any(Number));
+    expect(firstRecord!.pid).not.toBe(secondRecord!.pid);
+    expect(firstRecord!.socket).not.toBe(secondRecord!.socket);
+
+    await writeFailingTest(firstRoot, "worktree-failure");
+    expect(await waitForSnapshot(firstRoot, "shared", "failed")).toMatchObject({
+      counts: { passed: 0, failed: 1, skipped: 0 },
+      failures: [
+        {
+          test: "sample",
+          errors: [
+            expect.objectContaining({
+              message: expect.stringContaining("expected true to be false"),
+            }),
+          ],
+        },
+      ],
+      unhandledErrors: [],
+    });
+    expect(
+      await waitForOutputMarker(firstRoot, "shared", "worktree-failure"),
+    ).toContain("worktree-failure");
+    expect(await snapshot(secondRoot, "shared")).toMatchObject({
+      state: "passed",
+      counts: { passed: 1, failed: 0, skipped: 0 },
+      failures: [],
+    });
+    expect((await output(secondRoot, "shared")).toString()).not.toContain(
+      "worktree-failure",
+    );
+
+    await writePassingTest(firstRoot, "worktree-recovered");
+    expect(await waitForSnapshot(firstRoot, "shared", "passed")).toMatchObject({
+      counts: { passed: 1, failed: 0, skipped: 0 },
+      failures: [],
+      unhandledErrors: [],
+    });
+    expect(
+      await waitForOutputMarker(firstRoot, "shared", "worktree-recovered"),
+    ).toContain("worktree-recovered");
+    expect((await command(firstRoot, "stop", "shared")).stdout).toContain(
+      "Stopped shared.",
+    );
+    expect(() => process.kill(firstRecord!.pid!, 0)).toThrow();
+    expect(await readDiscovery(firstKey)).toBeUndefined();
+    await expect(stat(firstRecord!.socket)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await readDiscovery(secondKey)).toEqual(secondRecord);
+    expect(() => process.kill(secondRecord!.pid!, 0)).not.toThrow();
+    expect(await snapshot(secondRoot, "shared")).toMatchObject({
+      state: "passed",
+    });
+
+    await command(secondRoot, "stop", "shared");
+    expect(() => process.kill(secondRecord!.pid!, 0)).toThrow();
+    expect(await readDiscovery(secondKey)).toBeUndefined();
+    await expect(stat(secondRecord!.socket)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  }, 60_000);
 });

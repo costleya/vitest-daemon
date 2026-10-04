@@ -7,6 +7,9 @@ description: Use vitest-daemon whenever agents need Vitest watch mode, including
 
 Run `vitest-daemon` from the worktree being tested.
 
+Requires Node.js 24 or newer and Vitest `^5.0.3` installed in that worktree. The
+daemon loads the worktree's `vitest/node` API.
+
 ## Choose the workflow
 
 - Use `vitest-daemon` for every Vitest watch, whether one agent or several agents consume its results.

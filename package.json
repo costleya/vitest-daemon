@@ -23,7 +23,7 @@
     "node": ">=24"
   },
   "peerDependencies": {
-    "vitest": "^4.1.10"
+    "vitest": "^5.0.3"
   },
   "peerDependenciesMeta": {
     "vitest": {
@@ -34,7 +34,7 @@
     "@types/node": "^24.10.0",
     "prettier": "^3.6.2",
     "typescript": "^6.0.0",
-    "vitest": "^4.1.10"
+    "vitest": "^5.0.3"
   },
   "keywords": [
     "vitest",

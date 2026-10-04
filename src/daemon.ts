@@ -32,7 +32,6 @@ type VitestNode = {
     options: Record<string, unknown>;
   };
   createVitest(
-    mode: "test",
     options: Record<string, unknown>,
     viteOverrides: Record<string, unknown>,
     vitestOptions: Record<string, unknown>,
@@ -185,7 +184,6 @@ export async function runDaemon(options: DaemonOptions): Promise<void> {
       parsed.options.run = false;
 
       vitest = await vitestNode.createVitest(
-        "test",
         parsed.options,
         {},
         { stdout: outputStream, stderr: outputStream },
