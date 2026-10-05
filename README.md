@@ -4,7 +4,7 @@
 that launched them. A daemon is scoped by its canonical worktree path and name,
 so agents in separate worktrees never share a watcher accidentally.
 
-Requires Node.js 24 or newer and Vitest `^5.0.3` in the target worktree.
+Requires Node.js 24 or newer and Vitest `^5.0.0` in the target worktree.
 
 ## Install globally from this checkout
 
@@ -65,7 +65,7 @@ directory. For example, check the supported minimum version:
 
 ```sh
 compat_root=$(mktemp -d)
-npm install --prefix "$compat_root/v5" --no-save --package-lock=false vitest@5.0.3
+npm install --prefix "$compat_root/v5" --no-save --package-lock=false vitest@5.0.0
 VITEST_DAEMON_FIXTURE_NODE_MODULES="$compat_root/v5/node_modules" pnpm test
 ```
 
