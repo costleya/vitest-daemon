@@ -27,6 +27,7 @@ type VitestContext = {
 };
 
 type VitestNode = {
+  version?: string;
   parseCLI(arguments_: string[]): {
     filter: string[];
     options: Record<string, unknown>;
@@ -44,13 +45,38 @@ function json(response: JsonResponse): Buffer {
 
 async function loadVitest(root: string): Promise<VitestNode> {
   const packageRequire = createRequire(path.join(root, "package.json"));
-  let modulePath: string;
-  try {
-    modulePath = packageRequire.resolve("vitest/node");
-  } catch {
-    throw new Error(`Cannot resolve vitest/node from ${root}.`);
+  const candidates = [
+    "vitest/node",
+    "vite-plus/test/node",
+    // Vite+ projects can install vite-plus under the vitest package name.
+    "vitest/test/node",
+  ];
+  for (const candidate of candidates) {
+    let modulePath: string;
+    try {
+      modulePath = packageRequire.resolve(candidate);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        code === "MODULE_NOT_FOUND" ||
+        code === "ERR_PACKAGE_PATH_NOT_EXPORTED"
+      ) {
+        continue;
+      }
+      throw error;
+    }
+    // Once resolved, surface import failures instead of switching runners.
+    const vitestNode = (await import(
+      pathToFileURL(modulePath).href
+    )) as VitestNode;
+    if (candidate !== "vitest/node" && !vitestNode.version?.startsWith("5.")) {
+      throw new Error(
+        `Vite+ requires a Vitest 5 API; loaded version ${vitestNode.version ?? "unknown"} from ${candidate}.`,
+      );
+    }
+    return vitestNode;
   }
-  return import(pathToFileURL(modulePath).href) as Promise<VitestNode>;
+  throw new Error(`Cannot resolve ${candidates.join(", ")} from ${root}.`);
 }
 
 function readRequest(socket: Socket): Promise<JsonRequest> {

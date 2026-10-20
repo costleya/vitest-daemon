@@ -4,7 +4,10 @@
 that launched them. A daemon is scoped by its canonical worktree path and name,
 so agents in separate worktrees never share a watcher accidentally.
 
-Requires Node.js 24 or newer and Vitest `^5.0.0` in the target worktree.
+Requires Node.js 24 or newer and either Vitest `^5.0.0` or Vite+ 1.x with its
+bundled Vitest 5 API in the target worktree. Vite+ 1.3.0 is the tested version.
+Follow Vite+'s Node.js requirements when using it. Older Vite+ releases that
+bundle Vitest 4 are unsupported.
 
 ## Install globally from this checkout
 
@@ -14,8 +17,12 @@ pnpm build
 pnpm link --global
 ```
 
-The global CLI loads `vitest/node` from the target worktree. Vitest remains a
+The global CLI loads `vitest/node` from the target worktree when available.
+Otherwise, it tries `vite-plus/test/node`, then `vitest/test/node` for projects
+that alias the `vitest` package to Vite+. A resolved module's import errors are
+reported without switching to another runner. The selected runner remains a
 dependency of the project being watched, not of the global installation.
+Existing Vitest projects use the same API and commands as before.
 
 ## Commands
 
@@ -71,3 +78,17 @@ VITEST_DAEMON_FIXTURE_NODE_MODULES="$compat_root/v5/node_modules" pnpm test
 
 The integration suite checks watch reruns, structured failures and raw output,
 separate worktrees using the same watcher name, and shutdown cleanup.
+
+To include the real Vite+ compatibility test, install Vite+ separately and point
+`VITEST_DAEMON_VITE_PLUS_NODE_MODULES` at that installation:
+
+```sh
+vite_plus_root=$(mktemp -d)
+npm install --prefix "$vite_plus_root" --no-save --package-lock=false vite-plus@1.3.0
+VITEST_DAEMON_VITE_PLUS_NODE_MODULES="$vite_plus_root/node_modules" pnpm test
+```
+
+These optional tests expose Vite+ as either `vite-plus` or the `vitest` alias,
+verify that `vitest/node` cannot resolve, and check watch failure, recovery, raw
+output, and shutdown through the public Vite+ test API. The default suite
+also checks runner preference, fallback resolution, and startup diagnostics.

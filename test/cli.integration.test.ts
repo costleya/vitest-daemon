@@ -31,7 +31,12 @@ const fixtureNodeModules = path.resolve(
   process.env.VITEST_DAEMON_FIXTURE_NODE_MODULES ??
     path.join(repositoryRoot, "node_modules"),
 );
+const vitePlusNodeModules = process.env.VITEST_DAEMON_VITE_PLUS_NODE_MODULES;
 const fixtures: string[] = [];
+// pnpm's Vitest launcher injects NODE_PATH for its own dependencies. Fixture
+// processes must resolve their runner from the fixture's installation alone.
+const fixtureEnvironment = { ...process.env };
+delete fixtureEnvironment.NODE_PATH;
 
 type CommandResult = { stdout: string; stderr: string };
 
@@ -46,6 +51,7 @@ async function command(
     {
       encoding: "utf8",
       timeout: 15_000,
+      env: fixtureEnvironment,
     },
   );
 }
@@ -54,7 +60,7 @@ async function output(root: string, name: string): Promise<Buffer> {
   const result = await execFileAsync(
     process.execPath,
     [cliPath, "output", name, "--root", root],
-    { encoding: "buffer", timeout: 15_000 },
+    { encoding: "buffer", timeout: 15_000, env: fixtureEnvironment },
   );
   return result.stdout;
 }
@@ -76,7 +82,10 @@ async function waitForOutputMarker(
   );
 }
 
-async function createFixture(label: string): Promise<string> {
+async function createFixture(
+  label: string,
+  linkNodeModules = true,
+): Promise<string> {
   const directory = await mkdtemp(
     path.join(tmpdir(), `vitest-daemon-${label}-`),
   );
@@ -85,7 +94,9 @@ async function createFixture(label: string): Promise<string> {
     path.join(directory, "package.json"),
     JSON.stringify({ name: `fixture-${label}`, type: "module", private: true }),
   );
-  await symlink(fixtureNodeModules, path.join(directory, "node_modules"));
+  if (linkNodeModules) {
+    await symlink(fixtureNodeModules, path.join(directory, "node_modules"));
+  }
   await writeFile(
     path.join(directory, "vitest.config.mjs"),
     `export default { test: { reporters: ['verbose'], projects: [{ test: { name: 'unit', include: ['sample.test.mjs'] } }] } }\n`,
@@ -94,10 +105,14 @@ async function createFixture(label: string): Promise<string> {
   return directory;
 }
 
-async function writePassingTest(root: string, marker: string): Promise<void> {
+async function writePassingTest(
+  root: string,
+  marker: string,
+  testImport = "vitest",
+): Promise<void> {
   await writeFile(
     path.join(root, "sample.test.mjs"),
-    `import { expect, test } from 'vitest'\n` +
+    `import { expect, test } from ${JSON.stringify(testImport)}\n` +
       `test('sample', async () => {\n` +
       `  await new Promise(resolve => setTimeout(resolve, 250))\n` +
       `  console.log(${JSON.stringify(marker)})\n` +
@@ -107,10 +122,14 @@ async function writePassingTest(root: string, marker: string): Promise<void> {
   );
 }
 
-async function writeFailingTest(root: string, marker: string): Promise<void> {
+async function writeFailingTest(
+  root: string,
+  marker: string,
+  testImport = "vitest",
+): Promise<void> {
   await writeFile(
     path.join(root, "sample.test.mjs"),
-    `import { expect, test } from 'vitest'\n` +
+    `import { expect, test } from ${JSON.stringify(testImport)}\n` +
       `test('sample', async () => {\n` +
       `  await new Promise(resolve => setTimeout(resolve, 250))\n` +
       `  console.log(${JSON.stringify(marker)})\n` +
@@ -118,6 +137,38 @@ async function writeFailingTest(root: string, marker: string): Promise<void> {
       `  expect(true).toBe(false)\n` +
       `})\n`,
   );
+}
+
+async function createResolutionFixture(): Promise<string> {
+  const root = await createFixture("resolution", false);
+  await mkdir(path.join(root, "node_modules"));
+  return root;
+}
+
+async function installNodeApi(
+  root: string,
+  packageName: string,
+  subpath: string,
+  source: string,
+): Promise<void> {
+  const directory = path.join(root, "node_modules", packageName);
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    path.join(directory, "package.json"),
+    JSON.stringify({ type: "module", exports: { [subpath]: "./node.mjs" } }),
+  );
+  await writeFile(path.join(directory, "node.mjs"), source);
+}
+
+function selectedApi(marker: string, version = "5.0.0"): string {
+  return `export const version = ${JSON.stringify(version)};
+export function parseCLI() { throw new Error(${JSON.stringify(marker)}); }
+`;
+}
+
+async function startupFailure(root: string): Promise<WatchSnapshot> {
+  await command(root, "start", "resolution");
+  return waitForSnapshot(root, "resolution", "failed");
 }
 
 async function snapshot(root: string, name: string): Promise<WatchSnapshot> {
@@ -176,6 +227,262 @@ afterEach(async () => {
       .map((directory) => rm(directory, { force: true, recursive: true })),
   );
 });
+
+describe.runIf(vitePlusNodeModules)("Vite+ compatibility", () => {
+  it.each(["vite-plus", "vitest"])(
+    "runs the real Vite+ API installed as %s through watch failure, recovery, output, and shutdown",
+    async (packageName) => {
+      const root = await createResolutionFixture();
+      await symlink(
+        path.resolve(vitePlusNodeModules!, "vite-plus"),
+        path.join(root, "node_modules", packageName),
+      );
+      // Check native resolution with the same pnpm NODE_PATH isolation as the CLI.
+      const resolved = await execFileAsync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          `import { createRequire } from 'node:module';
+const require = createRequire(process.argv[1]);
+let standalone;
+try { standalone = require.resolve('vitest/node'); }
+catch (error) {
+  if (!['MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED'].includes(error.code)) throw error;
+}
+console.log(JSON.stringify({ standalone: standalone ?? null, selected: require.resolve(process.argv[2]) }));`,
+          path.join(root, "package.json"),
+          `${packageName}/test/node`,
+        ],
+        { encoding: "utf8", timeout: 15_000, env: fixtureEnvironment },
+      );
+      expect(JSON.parse(resolved.stdout)).toEqual({
+        standalone: null,
+        selected: expect.stringContaining("vite-plus"),
+      });
+      await writePassingTest(root, "vite-plus-pass", `${packageName}/test`);
+      await command(root, "start", "vite-plus", "--", "--project", "unit");
+      expect(await waitForSnapshot(root, "vite-plus", "passed")).toMatchObject({
+        counts: { passed: 1, failed: 0, skipped: 0 },
+        failures: [],
+        unhandledErrors: [],
+      });
+      expect(
+        await waitForOutputMarker(root, "vite-plus", "vite-plus-pass"),
+      ).toContain("vite-plus-pass");
+      const key = watcherKey(await canonicalRoot(root), "vite-plus");
+      const record = await readDiscovery(key);
+      expect(record?.pid).toEqual(expect.any(Number));
+
+      await writeFailingTest(root, "vite-plus-failure", `${packageName}/test`);
+      expect(await waitForSnapshot(root, "vite-plus", "failed")).toMatchObject({
+        counts: { passed: 0, failed: 1, skipped: 0 },
+        failures: [
+          {
+            project: "unit",
+            file: "sample.test.mjs",
+            test: "sample",
+            errors: [
+              { message: expect.stringContaining("expected true to be false") },
+            ],
+          },
+        ],
+        unhandledErrors: [],
+      });
+      expect(
+        await waitForOutputMarker(
+          root,
+          "vite-plus",
+          "VITE-PLUS-FAILURE-STDERR",
+        ),
+      ).toContain("VITE-PLUS-FAILURE-STDERR");
+      await writePassingTest(
+        root,
+        "vite-plus-recovered",
+        `${packageName}/test`,
+      );
+      expect(await waitForSnapshot(root, "vite-plus", "passed")).toMatchObject({
+        counts: { passed: 1, failed: 0, skipped: 0 },
+        failures: [],
+        unhandledErrors: [],
+      });
+      expect(
+        await waitForOutputMarker(root, "vite-plus", "vite-plus-recovered"),
+      ).toContain("vite-plus-recovered");
+      expect((await command(root, "stop", "vite-plus")).stdout).toContain(
+        "Stopped vite-plus.",
+      );
+      expect(() => process.kill(record!.pid!, 0)).toThrow();
+      expect(await readDiscovery(key)).toBeUndefined();
+      await expect(stat(record!.socket)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+    60_000,
+  );
+});
+
+describe(
+  "runner package resolution",
+  { concurrent: false, timeout: 30_000 },
+  () => {
+    it("prefers an existing standalone Vitest API over Vite+", async () => {
+      const root = await createResolutionFixture();
+      await installNodeApi(
+        root,
+        "vitest",
+        "./node",
+        selectedApi("standalone-selected"),
+      );
+      await installNodeApi(
+        root,
+        "vite-plus",
+        "./test/node",
+        selectedApi("vite-plus-selected"),
+      );
+      expect(await startupFailure(root)).toMatchObject({
+        failures: [{ errors: [{ message: "standalone-selected" }] }],
+      });
+    });
+
+    it.each([
+      ["vite-plus", "./test/node"],
+      ["vitest", "./test/node"],
+    ])(
+      "loads the public %s%s API when vitest/node is unavailable",
+      async (name, subpath) => {
+        const root = await createResolutionFixture();
+        await installNodeApi(
+          root,
+          name,
+          subpath,
+          selectedApi("fallback-selected"),
+        );
+        expect(await startupFailure(root)).toMatchObject({
+          failures: [{ errors: [{ message: "fallback-selected" }] }],
+        });
+      },
+    );
+
+    it("prefers vite-plus/test/node over the vitest alias entry", async () => {
+      const root = await createResolutionFixture();
+      await installNodeApi(
+        root,
+        "vitest",
+        "./test/node",
+        selectedApi("alias-selected"),
+      );
+      await installNodeApi(
+        root,
+        "vite-plus",
+        "./test/node",
+        selectedApi("vite-plus-selected"),
+      );
+      expect(await startupFailure(root)).toMatchObject({
+        failures: [{ errors: [{ message: "vite-plus-selected" }] }],
+      });
+    });
+
+    it.each(["vitest", "vite-plus"])(
+      "preserves import errors from resolved %s instead of trying another API",
+      async (name) => {
+        const root = await createResolutionFixture();
+        await installNodeApi(
+          root,
+          "vitest",
+          "./test/node",
+          selectedApi("alias-selected"),
+        );
+        await installNodeApi(
+          root,
+          "vite-plus",
+          "./test/node",
+          selectedApi("vite-plus-selected"),
+        );
+        await installNodeApi(
+          root,
+          name,
+          name === "vitest" ? "./node" : "./test/node",
+          `import './missing-internal.mjs';`,
+        );
+        expect(await startupFailure(root)).toMatchObject({
+          failures: [
+            {
+              errors: [
+                { message: expect.stringContaining("missing-internal.mjs") },
+              ],
+            },
+          ],
+        });
+      },
+    );
+
+    it("preserves invalid package configuration errors instead of falling back", async () => {
+      const root = await createResolutionFixture();
+      await installNodeApi(
+        root,
+        "vitest",
+        "./node",
+        selectedApi("standalone-selected"),
+      );
+      await writeFile(
+        path.join(root, "node_modules", "vitest", "package.json"),
+        "{",
+      );
+      await installNodeApi(
+        root,
+        "vite-plus",
+        "./test/node",
+        selectedApi("vite-plus-selected"),
+      );
+      expect(await startupFailure(root)).toMatchObject({
+        failures: [
+          {
+            errors: [
+              { message: expect.stringContaining("Invalid package config") },
+            ],
+          },
+        ],
+      });
+    });
+
+    it("names the supported package entry points when none can be resolved", async () => {
+      const root = await createResolutionFixture();
+      const failed = await startupFailure(root);
+      expect(failed).toMatchObject({
+        counts: { passed: 0, failed: 0, skipped: 0 },
+        failures: [
+          {
+            errors: [
+              {
+                message: expect.stringContaining("Cannot resolve vitest/node"),
+              },
+            ],
+          },
+        ],
+      });
+      const message =
+        failed.state === "failed" ? failed.failures[0]!.errors[0]!.message : "";
+      expect(message).toContain("vite-plus/test/node");
+      expect(message).toContain("vitest/test/node");
+    });
+
+    it("reports unsupported Vite+ Vitest versions before invoking their API", async () => {
+      const root = await createResolutionFixture();
+      await installNodeApi(
+        root,
+        "vite-plus",
+        "./test/node",
+        selectedApi("must-not-invoke", "4.1.0"),
+      );
+      const failed = await startupFailure(root);
+      expect(failed).toMatchObject({
+        failures: [{ errors: [{ message: expect.stringContaining("4.1.0") }] }],
+      });
+      expect(JSON.stringify(failed)).not.toContain("must-not-invoke");
+    });
+  },
+);
 
 describe("vitest-daemon CLI", { concurrent: false }, () => {
   it.each(["hang", "reject", "socket-lost", "startup-hang"])(

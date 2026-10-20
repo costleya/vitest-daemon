@@ -7,8 +7,13 @@ description: Use vitest-daemon whenever agents need Vitest watch mode, including
 
 Run `vitest-daemon` from the worktree being tested.
 
-Requires Node.js 24 or newer and Vitest `^5.0.0` installed in that worktree. The
-daemon loads the worktree's `vitest/node` API.
+Requires Node.js 24 or newer and either Vitest `^5.0.0` or Vite+ 1.x with its
+bundled Vitest 5 API installed in that worktree. Vite+ 1.3.0 is the tested
+version; follow Vite+'s Node.js requirements when using it. Older Vite+
+releases that bundle Vitest 4 are unsupported.
+The daemon prefers the worktree's `vitest/node` API, then falls back to
+`vite-plus/test/node` or `vitest/test/node` for Vite+ aliased as `vitest`.
+Import failures from a resolved API are reported without switching runners.
 
 ## Choose the workflow
 
